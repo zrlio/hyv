@@ -1,0 +1,7 @@
+EXTRA_CFLAGS := -O2 -Wall -Werror -I$(src)/../../include -I$(src) -I$(CHELSIO_KSRC)/iw_cxgb4 -I$(CHELSIO_KSRC)/cxgb4
+KBUILD_EXTRA_SYMBOLS=$(src)/../../virtio_hyv/Module.symvers
+
+obj-m += virtiw_cxgb4.o
+
+virtiw_cxgb4-objs :=  virtc4iw_device.o virtc4iw_verbs.o virtc4iw_dma.o
+

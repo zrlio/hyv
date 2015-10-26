@@ -1,0 +1,8 @@
+EXTRA_CFLAGS := -O2 -g -Wall -Werror -I$(src)/../../hypercall \
+  -I$(src)/../../include -I$(KSRC)/drivers/vhost -I$(src)/../../object_map
+
+obj-m += vhost_rdmacm.o
+
+vhost_rdmacm-objs :=  vhost_rdmacm_main.o ../../hypercall/hypercall_host.o \
+	vhost_rdmacm_hcall.o ../../object_map/object_map.o
+ 

@@ -1,0 +1,7 @@
+EXTRA_CFLAGS := -O2 -Wall -Werror -I$(src)/../../include -I$(SIW_INC)
+KBUILD_EXTRA_SYMBOLS=$(src)/../../virtio_hyv/Module.symvers
+
+obj-m += virtsiw2.o
+
+virtsiw2-objs := virtsiw2_device.o virtsiw2_verbs.o
+
