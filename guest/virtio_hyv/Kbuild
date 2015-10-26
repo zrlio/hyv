@@ -1,0 +1,9 @@
+EXTRA_CFLAGS := -O2 -Wall -Werror -I$(src)/../../hypercall \
+  -I$(src)/../../include -I$(src)/../include
+
+obj-m += virtio_hyv.o
+
+virtio_hyv-objs :=  virtio_hyv_main.o \
+  ../../hypercall/hypercall_guest.o hyv_dev.o virtio_hyv_hypercall.o \
+  hyv_ibv.o hyv_mem.o virtio_hyv_event.o hyv_kverbs.o
+

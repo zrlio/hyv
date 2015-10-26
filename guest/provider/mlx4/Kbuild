@@ -1,0 +1,7 @@
+EXTRA_CFLAGS := -O2 -Wall -Werror -I$(src)/../../include -I$(KSRC)/drivers/infiniband/hw/mlx4
+KBUILD_EXTRA_SYMBOLS=$(src)/../../virtio_hyv/Module.symvers
+
+obj-m += virtmlx4_ib.o
+
+virtmlx4_ib-objs := virtmlx4_device.o virtmlx4_verbs.o
+

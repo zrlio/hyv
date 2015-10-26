@@ -1,0 +1,8 @@
+EXTRA_CFLAGS := -O2 -Wall -Werror -I$(src)/../../hypercall \
+  -I$(src)/../../include -I$(src)/../include
+
+obj-m += virtio_rdmacm.o
+
+virtio_rdmacm-objs :=  virtio_rdmacm_main.o ../../hypercall/hypercall_guest.o \
+	virtio_rdmacm_hcall.o rdmacm.o rdmacm_ibdev.o
+

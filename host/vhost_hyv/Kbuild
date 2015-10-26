@@ -1,0 +1,10 @@
+EXTRA_CFLAGS := -O2 -g -Wall -Werror -I$(src)/../../hypercall \
+  -I$(src)/../../include -I$(KSRC)/drivers/vhost -I$(src)/../../object_map
+
+obj-m += vhost_hyv.o
+
+vhost_hyv-objs :=  vhost_hyv_main.o vhost_hyv_ibdev.o \
+  ../../hypercall/hypercall_host.o vhost_hyv_dev.o \
+  vhost_hyv_ibv.o vhost_hyv_mem.o vhost_mem.o vhost_hyv_event.o \
+  ../../object_map/object_map.o
+
