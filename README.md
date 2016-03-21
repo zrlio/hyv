@@ -53,7 +53,7 @@ In Proceedings of the 11th ACM SIGPLAN/SIGOPS International Conference on Virtua
 
 ##Qemu
 1. Get qemu source: git clone http://git.qemu.org/qemu.git
-2. Apply patch ./guest/qemu_diff.patch
+2. Apply patch ./host/qemu_diff.patch based on f2c85a2f36f57f155cda7bc9f7c42b44f1a2439e
 3. Follow these instructions to compile and test: http://wiki.qemu.org/Hosts/Linux#Simple_build_and_test_with_KVM
 
 ##Starting the guest
