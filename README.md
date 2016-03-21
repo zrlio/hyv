@@ -45,3 +45,37 @@ In Proceedings of the 11th ACM SIGPLAN/SIGOPS International Conference on Virtua
 
 
 # Compile & run
+
+##On host
+1. Install libibverbs and librdmacm
+2. Make sure kernel headers are installed (debian: apt-get install kernel-headers)
+3. Run make for each host kernel module: ./host/vhost_hyv and ./host/vhost_rdmacm
+
+##Qemu
+1. Get qemu source: git clone http://git.qemu.org/qemu.git
+2. Apply patch ./guest/qemu_diff.patch
+3. Follow these instructions to compile and test: http://wiki.qemu.org/Hosts/Linux#Simple_build_and_test_with_KVM
+
+##Starting the guest
+1. Make sure KVM is available and running: 
+* modprobe kvm 
+* check if /dev/kvm exists
+2. Remove all OFED provider modules on host (mlx4_ib, iw_cxgb4, siw2)
+3. Load ib_core and vhost modules
+4. Load vhost_hyv module
+5. Load needed provider modules (order is important!)
+6. Load rdma_cm module and vhost_rdmacm module
+7. To add RDMA device to VM prepare hyv config file, where each line is GUID of device in format XXXX:XXXX:XXXX:XXXX (note that hyv also supports adding/removing devices to a running VM)
+8. Add virtio-hyv and virtio-rdmacm device to VM (qemu) (e.g. "-device virtio-hyv-pci,config_path="./hyv_config" -device virtio-rdmacm-pci")
+
+##In guest
+1. Install libibverbs and librdmacm
+2. Install OFED user-libraries of devices libmlx4, libcxgb4 or libsiw2
+2. Make sure kernel headers are installed
+3. Run make for each guest kernel module: ./guest/virtio_hyv and ./guest/virtio_rdmacm
+4. Load ib_core and ib_uverbs
+5. Load virtio_rdmacm and virtio_hyv
+6. Load needed guest provider: virtio_cxgb4, virtmlx4_ib, or virtsiw2
+7. Check with ibv_devinfo if setup was successful!
+
+
