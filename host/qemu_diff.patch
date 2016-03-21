@@ -41,6 +41,352 @@ index ec9e855..0690edc 100644
  common-obj-$(CONFIG_VIRTIO_BLK_DATA_PLANE) += dataplane/
  
  obj-y += virtio.o virtio-balloon.o 
+diff --git a/hw/virtio/virtio-hyv.c b/hw/virtio/virtio-hyv.c
+new file mode 100644
+index 0000000..8816374
+--- /dev/null
++++ b/hw/virtio/virtio-hyv.c
+@@ -0,0 +1,340 @@
++/*
++ * Hybrid Virtualization (HyV) for Linux
++ *
++ * Author: Jonas Pfefferle <jpf@zurich.ibm.com>
++ *
++ * Copyright (c) 2015, IBM Corporation
++ *
++ * This software is available to you under a choice of one of two
++ * licenses.  You may choose to be licensed under the terms of the GNU
++ * General Public License (GPL) Version 2, available from the file
++ * COPYING in the main directory of this source tree, or the
++ * BSD license below:
++ *
++ *   Redistribution and use in source and binary forms, with or
++ *   without modification, are permitted provided that the following
++ *   conditions are met:
++ *
++ *   - Redistributions of source code must retain the above copyright notice,
++ *     this list of conditions and the following disclaimer.
++ *
++ *   - Redistributions in binary form must reproduce the above copyright
++ *     notice, this list of conditions and the following disclaimer in the
++ *     documentation and/or other materials provided with the distribution.
++ *
++ *   - Neither the name of IBM nor the names of its contributors may be
++ *     used to endorse or promote products derived from this software without
++ *     specific prior written permission.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
++ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
++ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#include "qemu/iov.h"
++#include "qemu/timer.h"
++#include "qemu-common.h"
++#include "hw/virtio/virtio.h"
++#include "hw/i386/pc.h"
++#include "hw/virtio/virtio-hyv.h"
++#include "sysemu/kvm.h"
++#include "exec/address-spaces.h"
++#include "qapi/visitor.h"
++#include "qemu/error-report.h"
++
++#include <infiniband/verbs.h>
++#include <infiniband/driver.h>
++#include <infiniband/arch.h>
++
++#include "hw/virtio/virtio-bus.h"
++
++static int virtio_hyv_read_config(VirtIOHyv *dev,
++		const char *path)
++{
++	FILE *fp = NULL;
++	int ret;
++	int add;
++	struct ibv_device **ibdev_list;
++	int num_devices;
++	char buf[PATH_MAX];
++
++	printf("%s\n", __FUNCTION__);
++
++	ibdev_list = ibv_get_device_list(&num_devices);
++	if (!ibdev_list) {
++		printf("virtio-hyv: could not get device list: %s",
++				strerror(errno));
++		ret = errno;
++		goto fail;
++	}
++
++	fp = fopen(path, "r");
++	if (!fp) {
++		printf("virtio-hyv: open config file failed: %s",
++				strerror(errno));
++		ret = errno;
++		goto fail_dev_list;
++	}
++
++	snprintf(buf, PATH_MAX, "/sys/class/hyv/vhost-%d/add", getpid());
++	add = open(buf, O_WRONLY);
++	if (add < 0) {
++		printf("virtio-hyv: open add failed: %s\n",
++				strerror(errno));
++		ret = errno;
++		goto fail_fopen;
++	}
++
++	while (1) {
++		ret = fscanf(fp, "%s", buf);
++		if (ret == EOF) {
++			break;
++		}
++		if (ret != 1) {
++			printf("virtio-hyv: config file invalid\n");
++			ret = -EINVAL;
++			break;
++		}
++
++		/* we don't want to use a stream here! */
++		ret = write(add, buf, strlen(buf));
++		if (ret == -ENODEV) {
++			/* there is no device with this guid */
++			printf("warn: there is no device with guid %s "
++					"- stop processing\n", buf);
++			break;
++		} else if (ret < 0) {
++			printf("Invalid config file!\n");
++			ret = -EINVAL;
++			break;
++		}
++	}
++
++	close(add);
++fail_fopen:
++	fclose(fp);
++fail_dev_list:
++	ibv_free_device_list(ibdev_list);
++fail:
++	return ret;
++}
++
++static void virtio_hyv_get_config(VirtIODevice *vdev,
++		uint8_t *config_data)
++{
++    VirtIOHyv *dev = VIRTIO_HYV(vdev);
++
++    memcpy(config_data, &dev->config, sizeof(VirtIOHyvConfig));
++}
++
++static uint32_t virtio_hyv_get_features(VirtIODevice *vdev, uint32_t f)
++{
++    return f;
++}
++
++static void virtio_hyv_save(QEMUFile *f, void *opaque)
++{
++    VirtIOHyv *s = VIRTIO_HYV(opaque);
++    VirtIODevice *vdev = VIRTIO_DEVICE(s);
++
++    virtio_save(vdev, f);
++}
++
++static int virtio_hyv_load(QEMUFile *f, void *opaque, int version_id)
++{
++    VirtIOHyv *s = VIRTIO_HYV(opaque);
++    VirtIODevice *vdev = VIRTIO_DEVICE(s);
++    int ret;
++
++    ret = virtio_load(vdev, f, version_id);
++    if (ret) {
++        return ret;
++    }
++
++    return 0;
++}
++
++static int vhost_hyv_start(VirtIOHyv *s)
++{
++	VirtIODevice *vdev = VIRTIO_DEVICE(s);
++	BusState *qbus = BUS(qdev_get_parent_bus(DEVICE(vdev)));
++	VirtioBusClass *k = VIRTIO_BUS_GET_CLASS(qbus);
++	int ret;
++	int i;
++
++	ret = vhost_dev_enable_notifiers(&s->dev, vdev);
++	if (ret < 0) {
++		return ret;
++	}
++
++	s->dev.acked_features = vdev->guest_features;
++	ret = vhost_dev_start(&s->dev, vdev);
++	if (ret < 0) {
++		printf("Error start vhost dev\n");
++		goto err_notifiers;
++	}
++
++	ret = k->set_guest_notifiers(qbus->parent, s->dev.nvqs, true);
++	if (ret < 0) {
++		printf("Error binding guest notifier\n");
++		goto err_vhost_stop;
++	}
++
++	for (i = 0; i < s->dev.nvqs; i++) {
++		vhost_virtqueue_mask(&s->dev, vdev, i, false);
++	}
++
++	/* notify guest of previously added devices */
++	s->dev.vhost_ops->vhost_call(&s->dev, VHOST_HYV_ADD_DEVS, NULL);
++
++	return 0;
++
++err_vhost_stop:
++	vhost_dev_stop(&s->dev, vdev);
++err_notifiers:
++	vhost_dev_disable_notifiers(&s->dev, vdev);
++	return ret;
++}
++
++static void vhost_hyv_stop(VirtIOHyv *s)
++{
++	VirtIODevice *vdev = VIRTIO_DEVICE(s);
++	BusState *qbus = BUS(qdev_get_parent_bus(DEVICE(vdev)));
++	VirtioBusClass *k = VIRTIO_BUS_GET_CLASS(qbus);
++	int ret;
++
++	ret = k->set_guest_notifiers(qbus->parent, s->dev.nvqs, false);
++	if (ret < 0) {
++		error_report("Error release guest notifier");
++	}
++	vhost_dev_stop(&s->dev, vdev);
++	vhost_dev_disable_notifiers(&s->dev, vdev);
++}
++
++static void virtio_hyv_set_status(VirtIODevice *vdev, uint8_t val)
++{
++	VirtIOHyv *s = VIRTIO_HYV(vdev);
++	bool start = (val & VIRTIO_CONFIG_S_DRIVER_OK);
++
++	if (s->dev.started == start) {
++		return;
++	}
++
++	printf("%s - ", __FUNCTION__);
++
++	if (start) {
++		int ret;
++		printf("start\n");
++
++		ret = vhost_hyv_start(s);
++		if (ret < 0) {
++			error_report("virtio-hyv: unable to start vhost: %s\n",
++						 strerror(-ret));
++			exit(1);
++		}
++	} else {
++		printf("stop\n");
++		vhost_hyv_stop(s);
++	}
++
++}
++
++static void virtio_hyv_handle_q(VirtIODevice *vdev, VirtQueue *vq)
++{
++	printf("%s\n", __FUNCTION__);
++}
++
++static void virtio_hyv_device_realize(DeviceState *dev, Error **errp)
++{
++    VirtIODevice *vdev = VIRTIO_DEVICE(dev);
++    VirtIOHyv *s = VIRTIO_HYV(vdev);
++    int ret;
++    int vhostfd;
++
++    printf("%s\n", __FUNCTION__);
++
++    virtio_init(vdev, "virtio-hyv", VIRTIO_ID_HYV,
++    		sizeof(VirtIOHyvConfig));
++
++    register_savevm(dev, "virtio-hyv", -1, 1,
++                    virtio_hyv_save, virtio_hyv_load, s);
++
++    s->vq[VIRTIO_HYV_VQ_HCALL] = virtio_add_queue(vdev,
++    		VIRTIO_HYV_VQ_HCALL_SIZE, virtio_hyv_handle_q);
++
++    s->vq[VIRTIO_HYV_VQ_EVT] = virtio_add_queue(vdev, 1,
++    		virtio_hyv_handle_q);
++
++    s->dev.nvqs = ARRAY_SIZE(s->vq);
++    s->dev.vqs = g_new(struct vhost_virtqueue, s->dev.nvqs);
++	s->dev.vq_index = 0;
++
++	vhostfd = open("/dev/vhost-hyv", O_RDWR);
++	if (vhostfd < 0) {
++		error_setg(errp, "vhost-hyv: open vhost char device failed: %s",
++				   strerror(errno));
++		return;
++	}
++
++	ret = vhost_dev_init(&s->dev, (void *)(uintptr_t)vhostfd,
++		            VHOST_BACKEND_TYPE_KERNEL, true);
++    if (ret < 0) {
++        error_setg(errp, "vhost-hyv: vhost initialization failed: %s\n",
++                strerror(-ret));
++        virtio_cleanup(vdev);
++        return;
++    }
++    s->dev.backend_features = 0;
++
++    if (s->config_path) {
++		virtio_hyv_read_config(s, s->config_path);
++	}
++}
++
++static void virtio_hyv_device_unrealize(DeviceState *dev, Error **errp)
++{
++    VirtIOHyv *s = VIRTIO_HYV(dev);
++    VirtIODevice *vdev = VIRTIO_DEVICE(dev);
++
++    virtio_hyv_set_status(vdev, 0);
++
++    unregister_savevm(dev, "virtio-hyv", s);
++    virtio_cleanup(vdev);
++}
++
++static Property virtio_hyv_properties[] = {
++//	DEFINE_PROP_STRING("config_path", VirtIOHyv, config_path),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
++static void virtio_hyv_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    VirtioDeviceClass *vdc = VIRTIO_DEVICE_CLASS(klass);
++    dc->props = virtio_hyv_properties;
++    set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
++    vdc->realize = virtio_hyv_device_realize;
++    vdc->unrealize = virtio_hyv_device_unrealize;
++    vdc->get_config = virtio_hyv_get_config;
++    vdc->set_status = virtio_hyv_set_status;
++    vdc->get_features = virtio_hyv_get_features;
++}
++
++static const TypeInfo virtio_hyv_info = {
++    .name = TYPE_VIRTIO_HYV,
++    .parent = TYPE_VIRTIO_DEVICE,
++    .instance_size = sizeof(VirtIOHyv),
++    .class_init = virtio_hyv_class_init,
++};
++
++static void virtio_register_types(void)
++{
++    type_register_static(&virtio_hyv_info);
++}
++
++type_init(virtio_register_types)
 diff --git a/hw/virtio/virtio-pci.c b/hw/virtio/virtio-pci.c
 index 3007319..8afd59c 100644
 --- a/hw/virtio/virtio-pci.c
@@ -516,6 +862,72 @@ index 85cc031..56a050c 100644
  struct vhost_scsi_target {
      int abi_version;
      char vhost_wwpn[224];
+diff --git a/include/hw/virtio/virtio-hyv.h b/include/hw/virtio/virtio-hyv.h
+new file mode 100644
+index 0000000..1f3b222
+--- /dev/null
++++ b/include/hw/virtio/virtio-hyv.h
+@@ -0,0 +1,60 @@
++/*
++ * Hybrid Virtualization (HyV) for Linux
++ *
++ * Author: Jonas Pfefferle <jpf@zurich.ibm.com>
++ *
++ * Copyright (c) 2015, IBM Corporation
++ *
++ * This software is available to you under a choice of one of two
++ * licenses.  You may choose to be licensed under the terms of the GNU
++ * General Public License (GPL) Version 2, available from the file
++ * COPYING in the main directory of this source tree, or the
++ * BSD license below:
++ *
++ *   Redistribution and use in source and binary forms, with or
++ *   without modification, are permitted provided that the following
++ *   conditions are met:
++ *
++ *   - Redistributions of source code must retain the above copyright notice,
++ *     this list of conditions and the following disclaimer.
++ *
++ *   - Redistributions in binary form must reproduce the above copyright
++ *     notice, this list of conditions and the following disclaimer in the
++ *     documentation and/or other materials provided with the distribution.
++ *
++ *   - Neither the name of IBM nor the names of its contributors may be
++ *     used to endorse or promote products derived from this software without
++ *     specific prior written permission.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
++ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
++ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#ifndef _QEMU_VIRTIO_HYV_H
++#define _QEMU_VIRTIO_HYV_H
++
++#include "hw/virtio/virtio.h"
++#include "hw/virtio/vhost.h"
++#include "hw/pci/pci.h"
++
++#include <virtio_hyv_config.h>
++
++#define TYPE_VIRTIO_HYV "virtio-hyv-device"
++#define VIRTIO_HYV(obj) \
++        OBJECT_CHECK(VirtIOHyv, (obj), TYPE_VIRTIO_HYV)
++
++typedef struct VirtIOHyv {
++    VirtIODevice parent_obj;
++    struct vhost_dev dev;
++    VirtIOHyvConfig config;
++    char *config_path;
++    VirtQueue *vq[VIRTIO_HYV_NVQS];
++} VirtIOHyv;
++
++#endif
 diff --git a/include/hw/virtio/virtio-rdmacm.h b/include/hw/virtio/virtio-rdmacm.h
 new file mode 100644
 index 0000000..e4a7e1b
