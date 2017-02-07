@@ -37,8 +37,10 @@
 #define MELLANOX 0x2c9
 
 #define CONNECTX3 0x1003
+#define CONNECTX3PRO 0x1007
 
 static const struct hyv_device_id id_table[] = { { CONNECTX3, MELLANOX },
+						 { CONNECTX3PRO, MELLANOX },
 						 { 0 } };
 
 static ssize_t show_vendor(struct device *dev, struct device_attribute *attr,
